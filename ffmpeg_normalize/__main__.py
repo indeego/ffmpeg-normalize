@@ -64,11 +64,11 @@ import os
 import re
 import sys
 import logging
+import glob
 
 from docopt import docopt
 
-from . import __version__
-
+__version__ = "0.2.4"
 
 logger = logging.getLogger('ffmpeg_normalize')
 logger.setLevel(logging.DEBUG)
@@ -126,9 +126,9 @@ def run_command(cmd, raw=False, dry=False):
         return
 
     if raw:
-        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True, universal_newlines = True)
     else:
-        p = subprocess.Popen(cmd.split(" "), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        p = subprocess.Popen(cmd.split(" "), stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines = True)
 
     stdout, stderr = p.communicate()
 
@@ -145,9 +145,13 @@ def ffmpeg_get_mean(input_file):
     try:
         output = run_command(cmd, True)
     except Exception as e:
+        logger.error("error" + e.__cause__)
         raise e
     logger.debug(output)
     mean_volume_matches = re.findall(r"mean_volume: ([\-\d\.]+) dB", output)
+    logger.debug("mean volume mathches")
+    
+
     if (mean_volume_matches):
         mean_volume = float(mean_volume_matches[0])
     else:
@@ -175,7 +179,7 @@ def ffmpeg_adjust_volume(input_file, gain, output):
             cmd += ' ' + args['--extra-options'] + ' '
         cmd += ' "' + output + '"'
     else:
-        cmd = FFMPEG_CMD + ' -y -i "' + input_file + '" -vn -sn -filter:a "volume=' + str(gain) + 'dB" -c:a pcm_s16le "' + output + '"'
+        cmd = '"' + FFMPEG_CMD + '" -y -i "'  + input_file + '" -vn -sn -filter:a "volume=' + str(gain) + 'dB" -c:a pcm_s16le "' + output + '"'
 
     try:
         output = run_command(cmd, True, args['--dry-run'])
@@ -199,85 +203,87 @@ def main():
     logger.debug(args)
 
     count = 0
-    for input_file in args['<input-file>']:
-        count = count + 1
-        if not os.path.exists(input_file):
-            logger.error("file " + input_file + " does not exist")
-            continue
+    for input_scheme in args['<input-file>']:
+        for input_file in glob.glob(input_scheme):
+            logger.info("file " + input_file)
+            count = count + 1
+            if not os.path.exists(input_file):
+                logger.error("file " + input_file + " does not exist")
+                continue
 
-        path, filename = os.path.split(input_file)
-        basename = os.path.splitext(filename)[0]
+            path, filename = os.path.split(input_file)
+            basename = os.path.splitext(filename)[0]
 
-        output_path = path
+            output_path = path
 
-        if args['--merge']:
-            output_filename = filename
-        else:
-            output_filename = basename + ".wav"
-
-        if args['--dir']:
-            output_path = os.path.join(path, args['--prefix'])
-        else:
-            output_filename = args['--prefix'] + "-" + output_filename
-
-        if output_path and not os.path.exists(output_path):
-            os.makedirs(output_path)
-
-        output_file = os.path.join(output_path, output_filename)
-
-        logger.debug("writing result in " + output_file)
-
-        if not args['--force'] and os.path.exists(output_file):
-            logger.warning("output file " + output_file + " already exists, skipping. Use -f to force overwriting.")
-            continue
-
-        if 'ffmpeg' in FFMPEG_CMD:
-            logger.info("reading file " + str(count) + " of " + str(len(args['<input-file>'])) + " - " + input_file)
-
-            try:
-                mean, maximum = ffmpeg_get_mean(input_file)
-            except Exception as e:
-                continue # with next file
-
-            logger.info("mean volume: " + str(mean))
-            logger.info("max volume: " + str(maximum))
-
-            target_level = float(args['--level'])
-            if args['--max']:
-                adjustment = 0 + target_level - maximum
-                logger.info("file needs " + str(adjustment) + " dB gain to reach maximum")
+            if args['--merge']:
+                output_filename = filename
             else:
-                adjustment = target_level - mean
-                logger.info("file needs " + str(adjustment) + " dB gain to reach " + str(args['--level']) + " dB")
+                output_filename = basename + ".wav"
 
-            if maximum + adjustment > 0:
-                logger.info("adjusting " + input_file + " will lead to clipping of " + str(maximum + adjustment) + "dB")
+            if args['--dir']:
+                output_path = os.path.join(path, args['--prefix'])
+            else:
+                output_filename = args['--prefix'] + "-" + output_filename
 
-            if abs(adjustment) <= float(args['--threshold']):
-                logger.info("gain = " + str(adjustment) + ", will not adjust file")
+            if output_path and not os.path.exists(output_path):
+                os.makedirs(output_path)
+
+            output_file = os.path.join(output_path, output_filename)
+
+            logger.debug("writing result in " + output_file)
+
+            if not args['--force'] and os.path.exists(output_file):
+                logger.warning("output file " + output_file + " already exists, skipping. Use -f to force overwriting.")
                 continue
 
-            try:
-                ffmpeg_adjust_volume(input_file, adjustment, output_file)
-            except Exception as e:
-                continue
+            if 'ffmpeg' in FFMPEG_CMD:
+                logger.info("reading file " + str(count) + " of " + str(len(args['<input-file>'])) + " - " + input_file)
 
-            logger.info("normalized file written to " + output_file)
+                try:
+                    mean, maximum = ffmpeg_get_mean(input_file)
+                except Exception as e:
+                    continue # with next file
+
+                logger.info("mean volume: " + str(mean))
+                logger.info("max volume: " + str(maximum))
+
+                target_level = float(args['--level'])
+                if args['--max']:
+                    adjustment = 0 + target_level - maximum
+                    logger.info("file needs " + str(adjustment) + " dB gain to reach maximum")
+                else:
+                    adjustment = target_level - mean
+                    logger.info("file needs " + str(adjustment) + " dB gain to reach " + str(args['--level']) + " dB")
+
+                if maximum + adjustment > 0:
+                    logger.info("adjusting " + input_file + " will lead to clipping of " + str(maximum + adjustment) + "dB")
+
+                if abs(adjustment) <= float(args['--threshold']):
+                    logger.info("gain = " + str(adjustment) + ", will not adjust file")
+                    continue
+
+                try:
+                    ffmpeg_adjust_volume(input_file, adjustment, output_file)
+                except Exception as e:
+                    continue
+
+                logger.info("normalized file written to " + output_file)
 
 
-        else:
-            # avconv doesn't seem to have a way to measure volume level, so
-            # instead we use it to convert to wav, then use a separate programme
-            # and then convert back to the desired format.
-            # http://askubuntu.com/questions/247961/normalizing-video-volume-using-avconv
+            else:
+                # avconv doesn't seem to have a way to measure volume level, so
+                # instead we use it to convert to wav, then use a separate programme
+                # and then convert back to the desired format.
+                # http://askubuntu.com/questions/247961/normalizing-video-volume-using-avconv
 
-            logger.warning("avconv support is limited. Install ffmpeg from http://ffmpeg.org/download.html instead!")
+                logger.warning("avconv support is limited. Install ffmpeg from http://ffmpeg.org/download.html instead!")
 
-            cmd = FFMPEG_CMD + ' -i ' + input_file + ' -c:a pcm_s16le -vn "' + output_file + '"'
-            output = run_command(cmd, True, args['--dry-run'])
-            cmd = NORMALIZE_CMD + ' "' + output_file + '"'
-            output = run_command(cmd, True, args['--dry-run'])
-            logger.info(output)
+                cmd = '"' + FFMPEG_CMD + '" -i "' + input_file + ' -c:a pcm_s16le -vn "' + output_file + '"'
+                output = run_command(cmd, True, args['--dry-run'])
+                cmd = NORMALIZE_CMD + ' "' + output_file + '"'
+                output = run_command(cmd, True, args['--dry-run'])
+                logger.info(output)
 
 
 if __name__ == '__main__':
